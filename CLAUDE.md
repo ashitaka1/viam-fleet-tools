@@ -4,38 +4,51 @@ This file provides project-specific guidance to Claude Code (claude.ai/code) for
 
 ## Current Status
 
-Project phase: **Setup** — `project_spec.md` written, no code yet. Next: Milestone 1 (GCP + Firestore bootstrap).
+Project phase: **Setup** — `project_spec.md` rewritten for the new architecture, no code yet. Next: Milestone 1 (the `workload` sensor).
+
+Note: the local directory is still named `lab-telemetry` for historical reasons; the project is now `viam-fleet-tools` and will be renamed locally on the next session restart.
 
 ## About This Project
 
-*Brief description of what this project does and its key components.*
-a viam generic service that, when added to a machine, installs on that machine a standard suite of packages, keys, and services to make it easy to administer. it has to:
-  - make sure there's a 'viam' user with a 'checkmate' password and a specific .ssh/authorized_keys entry
-  - make sure tailscale is installed and up and registered with a specific auth key
-  - register the machine's viam part name and OS hostname with a remote service (probably with a rest call)
-  - implmement the viam app that will handle those registrations and provide a UI for browsing those machines
-  - do various other housekeeping that makes it easy for lab admins to keep track of thier teams' various viam machines.
+A toolkit of Viam modules for fleet operators. Two modules in v1:
 
-See `project_spec.md` for technical architecture, milestones, and implementation decisions.
+- **`workload`** — a sensor that emits a per-poll snapshot of system load (CPU, memory, disk, network, power, thermals, top processes), rich enough to characterize any workload against any target Linux machine.
+- **`baseline`** — a sensor + DoCommand service that enforces and reports machine baseline state: ensures the `viam` user exists with a configured SSH key, Tailscale is installed and joined with a configured tag, OS hostname matches the Viam part name, and a configured set of packages is installed. Each step is opt-in via the presence of its config block.
+
+No external services. Everything flows through the Viam fabric — Viam data manager persists captured readings to MongoDB, Viam's alert engine fires on conditional telemetry / log-based / part-offline alerts, downstream BI and integration systems consume from Viam directly.
+
+See `project_spec.md` for the full architecture, milestones, and design rationale.
 
 ## Project-Specific Conventions
 
-*Override or extend global defaults here. Only include conventions that differ from or add to the global CLAUDE.md.*
+### Reconcile logging discipline
+
+The `baseline` module follows a strict logging policy (also captured in memory at `feedback_log_verbosity.md`):
+
+- A no-op reconfigure emits exactly one info line.
+- A reconfigure that actually did work emits a tight info-level summary of what changed — never per-step chatter.
+- A reconfigure with a failed step emits a single info-level summary line; details go to debug.
+- Everything else (intermediate state, "checking X", "X is fine") is debug, off by default.
+
+When adding a new reconcile step, preserve this invariant.
+
+### Sensor data discipline
+
+The `baseline` sensor uses `data.ErrNoCaptureToStore` to skip capture cycles when its state snapshot hasn't changed. A configurable `heartbeat_polls` interval forces periodic capture even on no change so "still alive" remains visible in captured data. The `workload` sensor captures every poll — its data is legitimate time series.
 
 ### Testing
 
-*Describe how to run tests and any project-specific testing conventions:*
 ```bash
 make test
 ```
 
 ### Build / Run
 
-*How to build and run the project:*
-```bash
-# Build
-make build
+Each module has its own subdirectory with its own `Makefile` and `meta.json`.
 
-# Run
-make run
+```bash
+# Per module:
+make build          # local build
+make test           # tests
+make package        # tar.gz for registry upload
 ```

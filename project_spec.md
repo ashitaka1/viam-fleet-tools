@@ -1,169 +1,210 @@
-# lab-telemetry
+# viam-fleet-tools
 
 ## Purpose
 
-A Viam generic service that, when added to a machine, installs a standard suite of users, keys, packages, and network configuration so lab admins can uniformly administer fleets of Viam machines — plus a Viam Application for browsing the resulting machine registry.
+A small toolkit of Viam modules for fleet operators — measure machines, enforce baseline state on them, and surface both through Viam's existing alerting and data infrastructure. No external services to host; everything flows through the Viam fabric.
 
 ## User Profile
 
-**Primary:** Lab admins managing fleets of Viam machines across multiple labs. They need a consistent baseline on every machine (shared SSH access, tailscale membership, standard tools) and a single place to see what machines exist, where they are, and whether they're healthy.
+**Primary:** A fleet operator running a set of Viam machines — could be Viam's internal lab admins, a robotics company managing deployed bots, an integrator with customer fleets, or a hobbyist with a home cluster. They want fleet-wide visibility and a way to keep their machines uniformly configured without per-machine SSH sessions.
 
-**Secondary:** The generic service itself, which runs unattended on every machine and must be quiet, idempotent, and self-healing on demand.
+**Secondary:** Downstream enterprise systems that already consume Viam data — BI tools pointing at Viam's MongoDB backend, alert routing services receiving Viam webhook notifications, etc. These integrate with the project transparently because everything it produces is just Viam sensor data.
 
 ## Goals
 
-**Goal:** One Viam generic service, added to a machine's config, brings that machine up to a known baseline (viam user + SSH key, tailscale joined with a lab-specific tag, hostname normalized, baseline packages installed) and registers it with a central registry.
+**Goal:** Operators get a per-machine snapshot of system load (CPU, memory, disk, network, power, thermals, top processes) rich enough to characterize any workload against any target machine — and Viam's conditional telemetry alerts can fire on any of those signals out of the box.
 
-**Goal:** A Viam Application gives lab admins a browsable list of registered machines across labs, with enough metadata to find and identify any machine.
+**Goal:** Operators add one Viam module to a machine's config and get a baseline applied automatically — `viam` user with their SSH key, Tailscale joined and tagged, hostname normalized, packages installed — with each piece independently opt-in via configuration.
 
-**Goal:** Adding new housekeeping steps (future: unattended-upgrades, journald retention, etc.) is cheap — the reconcile framework is built for extension.
+**Goal:** State drift gets corrected on demand and reported through standard Viam channels. A failed reconcile step shows up in Viam's alert engine within one poll cycle.
 
-**Goal:** Logs are quiet by default. A no-op reconcile is a single info line. Only real work gets info-level logging.
+**Goal:** Adding a new baseline-enforcement step (future: unattended-upgrades, journald retention, fail2ban, etc.) is cheap — the reconcile framework is built for extension.
 
-**Non-Goal:** Secret rotation, secret storage, or any sophisticated credential management in v1. Secrets live in module config and are known tech debt.
+**Goal:** Logs are quiet by default. A no-op reconcile is one info line. Only real work gets info-level logging.
 
-**Non-Goal:** Real authentication on the Viam Application's Firestore reads in v1. Machine inventory is effectively semi-public; real auth is v2.
+**Non-Goal:** Hosting an external state store, writing a separate UI, or maintaining a separate auth/integration surface. Viam already has all of those; this project produces data and signals that flow through them.
 
-**Non-Goal:** Supporting OSes outside Ubuntu and Raspberry Pi OS in v1. Anything else errors loud at Reconfigure.
+**Non-Goal:** Fleet-wide aggregation alerts (e.g., "alert if 30% of bots in group X are unhealthy"). Viam's alert engine is per-machine. Cross-machine aggregation is left to whatever downstream system the operator routes alerts into.
 
-**Non-Goal:** Historical reconcile logs, bulk actions, UI-triggered reconciles. All v2.
+**Non-Goal:** Supporting OSes outside Linux (Ubuntu, Debian, Raspberry Pi OS, similar) in v1. Anything else errors loud at Reconfigure. Architectures: amd64 and arm64.
+
+**Non-Goal:** Secret rotation, credential management, or anything beyond passing secrets via module config attributes in v1.
 
 ## Features
 
 ### Required (v1)
 
-**Generic service (Go module):**
+**`workload` sensor (Go module)**
+- Per-poll Readings dict capturing system metrics rich enough for workload characterization (see Data Schema below)
+- Cross-platform Linux: works on amd64 and arm64; Intel RAPL, AMD k10temp/zenpower, generic hwmon all detected at runtime; degrades silently when a metric source is unavailable
+- Optional config: `top_n_processes` (default 3), `extra_disk_devices` (default empty)
+- Polling interval governed by Viam data capture; no internal scheduling
+- All polls captured (legitimate time series data)
+
+**`baseline` sensor + DoCommand (Go module)**
 - Pluggable reconcile framework with per-step structured status
 - Root-check at startup; error loud if not running as root
-- OS detection (Ubuntu + Raspberry Pi OS); error loud on unsupported
-- Reconcile step: ensure `viam` user exists with `checkmate` password and authorized_keys entry
-- Reconcile step: ensure tailscale is installed, up, and joined with the lab's auth key (which carries the lab tag)
-- Reconcile step: normalize OS hostname to match Viam part name
-- Reconcile step: install baseline package list
-- Reconcile step: upsert this machine's registration doc in Firestore (soft — failure doesn't block other steps)
+- OS detection (Linux distros listed above); error loud on unsupported
+- Built-in reconcile steps, each independently enabled by presence of its config block:
+  - `viam_user`: ensure `viam` user exists with the configured authorized_keys entry
+  - `tailscale`: ensure Tailscale is installed, up, and joined with the configured auth key
+  - `hostname`: normalize OS hostname to match the Viam part name
+  - `packages`: ensure the configured apt packages are installed
+- `Readings` returns current state + per-step reconcile status; uses `data.ErrNoCaptureToStore` to skip capture on no-change polls (heartbeat threshold forces periodic capture even on no change)
 - `DoCommand("reconcile")` re-runs the full reconcile on demand
-- One info line per no-op reconcile; info lines for work actually done; everything else debug
+- Single info line per no-op reconcile; tight info-level summary for actual work; everything else debug
+- Single error log on any failed step (drives Viam log-based alerts as backup signal)
 
-**Viam Application (static frontend):**
-- Machine list table fed by Firestore `machines` collection
-- Columns: part name, lab, OS, arch, tailscale IP, last reconcile time, per-step status
-- Free-text search over part name and hostname
-- Filter by lab
-- Filter by "unhealthy on last reconcile"
-- Machine detail panel with full Firestore doc + deep link to app.viam.com
-
-**Data layer:**
-- GCP project with Firestore (native mode)
-- `machines` collection, document ID = Viam part ID
-- `labs` collection (sparsely populated in v1; exists so v2 secret-refactor has a home)
+**Documentation**
+- README.md: what this is, who it's for, how to install each module, link to per-module docs
+- Per-module config reference covering every config block
+- Setup guide showing the typical "install on a fleet" flow
+- Architecture note explaining the no-external-store design and how Viam data + alerts cover the integration story
 
 ### Milestones
 
-Vertical-slice build order — prove each pipe before thickening:
+Vertical-slice build order:
 
-1. ⏳ **GCP + Firestore bootstrap** — project, Firestore, service account for module writes, schema documented
-2. ⏳ **Module scaffold** — Go module with reconcile framework, root check, OS detection, logging discipline, `DoCommand("reconcile")` — no reconcile steps implemented yet
-3. ⏳ **First reconcile step: Firestore registration** — proves the data pipeline end-to-end on a real machine
-4. ⏳ **Viam Application skeleton** — minimal machine-list table reading from Firestore, proves the UI pipeline
-5. ⏳ **Remaining reconcile steps** — viam user → hostname → packages → tailscale, one at a time
-6. ⏳ **UI thickening** — search, lab filter, unhealthy filter, detail panel
+1. ⏳ **`workload` sensor v1** — repo scaffold + Go module + Readings dict + Viam data capture verified on a real machine + Viam conditional telemetry alert fires on a threshold
+2. ⏳ **`baseline` sensor scaffold** — pluggable reconcile framework + root check + OS detection + DoCommand + Readings emitting `ErrNoCaptureToStore` correctly + single-line logging discipline — no enforcement steps implemented yet
+3. ⏳ **`baseline` reconcile steps** — `viam_user` → `hostname` → `packages` → `tailscale`, one at a time
+4. ⏳ **Alerting cookbook** — documented webhook + Slack + log-based alert recipes deployers can copy-paste
 
 ### Nice-to-Have (v2)
 
-- Edit lab-level metadata (package list, tailscale tag, SSH keys) from the UI — the lab-level config refactor
-- Trigger `reconcile` DoCommand from the UI via Viam SDK
-- Live component health from the Viam SDK merged into the machine list
-- Bulk actions (reconcile all in lab X)
+- Viam Application for browsing fleet state via Viam SDK
+- Reconcile-trigger button in the app (calls `DoCommand("reconcile")`)
+- Group-level config refactor — secrets and shared state move out of per-machine module config (probably leveraging Viam's org-level secrets API)
+- Additional baseline steps: unattended-upgrades, journald retention, SSH hardening, firewall, fail2ban
+- Additional workload metrics: context switches, interrupts, fd counts, network errors
 
 ### Bonus Round
 
-- Historical reconcile log (requires storing more than `last_*` fields)
-- Unattended upgrades, journald retention, SSH hardening, firewall, fail2ban — the "various housekeeping" pipeline, now cheap to add thanks to the pluggable reconcile framework
-- Real Firestore auth: Cloud Function trading a FusionAuth cookie for a Firebase custom token
-- Periodic reconcile loop (beyond the on-demand `DoCommand`)
-- Additional OS support (Fedora, macOS, NixOS)
+- Additional OS support (Fedora/RHEL, NixOS, macOS)
+- Fleet-wide aggregation alerting via an external evaluator service
+- Custom user-supplied reconcile steps loaded as Go plugins or sub-modules
 
 ## Tech Stack
 
 ### Language(s)
-- **Go** — generic service module (matches Viam SDK, matches lab-admin tooling conventions)
-- **Svelte 5 + TypeScript** — Viam Application frontend. Viam Applications are static browser apps; Svelte 5's runes-based reactivity fits the "read from Firestore, render a table" shape cleanly with less ceremony than React.
+- **Go** — both modules. Cross-compiles to a single static binary per architecture; matches the dominant Viam community module pattern; one toolchain across the repo.
 
 ### Frameworks/Libraries
-- Viam Go SDK — module boilerplate, `generic.Service` interface, module context (part ID, machine ID, location, org)
-- `cloud.google.com/go/firestore` — module-side writes to Firestore with a service account
-- `@viamrobotics/sdk` — browser-side Viam auth and machine metadata
-- Firebase JS SDK — browser-side Firestore reads
-- Vite + Svelte 5 (TypeScript) — static-frontend build
+- Viam Go SDK (`go.viam.com/rdk/...`) — sensor API, module boilerplate, data manager integration, `data.ErrNoCaptureToStore` sentinel
+- `gopsutil` — cross-platform system metrics (CPU, memory, disk, network, processes); covers ~80% of the workload sensor's needs
+- Direct `/sys` reads — Intel RAPL, AMD k10temp/zenpower, generic hwmon temperature scanning (filling the gaps gopsutil doesn't cover)
 
 ### Platform/Deployment
-- **Generic service:** distributed as a Viam module (registry or local). Runs as root under viam-server on Ubuntu + Raspberry Pi OS (amd64, arm64). Module metadata restricts supported architectures.
-- **Viam Application:** static bundle deployed to Viam's application hosting; accessed at `<appname>_<namespace>.viamapplications.com` with FusionAuth-backed auth.
-- **Firestore:** GCP native-mode Firestore in a dedicated project.
+- Modules distributed via the Viam module registry (or local module during development)
+- Runs as root under viam-server on Linux (amd64, arm64)
+- Module metadata (`meta.json`) restricts to supported architectures
 
 ### Infrastructure
-- GCP project (Firestore + one service account for module writes)
-- Tailscale account with lab-tagged auth keys
-- Viam org / Viam Application registration
+- None hosted by this project. Viam's MongoDB backend serves as the data store; Viam's alert engine handles alerting; Viam's auth handles access control.
+- Operator-supplied credentials (Tailscale auth key, SSH public keys) flow through module config attributes.
 
 ## Technical Architecture
 
 ### Components
 
-- **Generic service module** (Go, runs as root on each lab machine): implements Viam's `generic.Service` interface. Its `Reconfigure` and `DoCommand("reconcile")` entry points run a pluggable reconcile pipeline. Each step is a self-contained unit that reports a structured status. The module holds a Firestore client (constructed from the service-account key passed as a config attribute) for the registration step.
-- **Firestore** (GCP): source of truth for the machine registry and (eventually) lab-level metadata. `machines` written by the module, read by the Viam Application. `labs` sparsely populated in v1.
-- **Viam Application** (static Svelte 5 frontend): authenticates via FusionAuth, reads from Firestore using the Firebase JS SDK, uses the Viam SDK for deep links and future live-state integration. No server-side code.
+- **`workload` sensor** (Go, runs as the regular module user): each `Readings` call samples `/proc`, `/sys`, and `gopsutil` and returns a structured dict. Stateless apart from the small amount of delta tracking needed for rate-style metrics (CPU%, disk I/O, network throughput, RAPL energy).
+
+- **`baseline` sensor + service** (Go, runs as root): on `Reconfigure` and on `DoCommand("reconcile")`, runs each enabled reconcile step idempotently and aggregates results. `Readings` returns the current snapshot of state plus the most recent per-step status. Tracks last-emitted snapshot in memory; returns `data.ErrNoCaptureToStore` when current snapshot equals the last emitted one (with a periodic heartbeat override so "still alive" remains visible in captured data).
+
+- **Viam data manager** (provided by viam-server): persists captured readings to Viam's MongoDB backend. Operators point BI tools, ETL jobs, or compliance tooling at the same backend.
+
+- **Viam alert engine** (provided by Viam): conditional telemetry alerts fire on workload thresholds and on `baseline` status field transitions; log-based alerts catch reconcile errors via the module's structured error logs; part-online/offline alerts cover machine connectivity.
 
 ### Integration points
 
-- Module → Firestore: authenticated with a GCP service-account key passed via module config.
-- Module → Tailscale: `tailscale up --authkey ...` with the lab's pre-tagged auth key.
-- Module → System: direct `os/exec` to `useradd`, `apt-get`, `hostnamectl`, `tailscale`, etc. — all assume root.
-- Browser → Firestore: Firebase JS SDK with public reads in v1.
-- Browser → Viam: `@viamrobotics/sdk` with FusionAuth cookie, for deep links and future live-state enrichment.
+- Module → System: direct `os/exec` to `useradd`, `apt-get`, `hostnamectl`, `tailscale`, etc. — all assume root in `baseline`. `workload` reads `/proc` and `/sys` only; no privilege beyond what gopsutil needs.
+- Module → Tailscale: `tailscale up --authkey ...` with the operator's pre-tagged auth key.
+- Module → Viam fabric: standard SDK integration (sensor Readings, DoCommand, reconfigure).
+- Operator's enterprise systems → Viam: BI tools query MongoDB; alert routing receives webhook payloads.
 
 ### Data Schema
 
-**Collection `machines`** — document ID is the Viam part ID (stable, unique, immutable).
+#### `workload` Readings (per poll)
 
-| Field | Type | Source | Notes |
-|---|---|---|---|
-| `part_id` | string | Viam module context | Duplicated in doc ID for query convenience |
-| `part_name` | string | Viam module context | Can change; kept in sync |
-| `machine_id` | string | Viam module context | Parent machine |
-| `location_id` | string | Viam module context | Viam location |
-| `org_id` | string | Viam module context | Viam org |
-| `hostname` | string | `os.Hostname()` | After normalization, should equal `part_name` |
-| `os` | string | `/etc/os-release` ID + VERSION | e.g. `ubuntu 22.04` |
-| `arch` | string | `runtime.GOARCH` | `amd64`, `arm64` |
-| `tailscale_ip` | string | `tailscale ip -4` | 100.x address |
-| `tailscale_hostname` | string | `tailscale status --json` | Tailnet name |
-| `lab` | string | module config | Free-form lab identifier |
-| `last_reconcile_at` | timestamp | `time.Now()` | Updated every reconcile |
-| `last_reconcile_status` | map | reconcile result | `{user: "ok", tailscale: "ok", hostname: "ok", packages: "ok", firestore: "ok"}` — any step may be `"failed: <reason>"` |
-| `module_version` | string | build-time constant | Tracks rollouts |
+| Group | Field | Notes |
+|---|---|---|
+| **CPU** | `cpu_pct_avg` | Overall utilization |
+| | `cpu_pct_max_core` | Single-thread bottleneck signal |
+| | `cpu_pct_per_core` | Per-core array |
+| | `cpu_freq_mhz_avg` | Turbo/throttle visibility |
+| | `cpu_freq_mhz_max` | Peak among cores |
+| | `load_avg_1`, `load_avg_5`, `load_avg_15` | Classic Linux signals |
+| **Memory** | `mem_used_mb` | Excluding cache (real working set) |
+| | `mem_available_mb`, `mem_total_mb` | Headroom context |
+| | `swap_used_mb` | Absolute |
+| | `swap_in_mb_per_sec`, `swap_out_mb_per_sec` | Activity (more diagnostic than usage) |
+| **Disk** (per device) | `disk_read_mbps`, `disk_write_mbps` | Throughput |
+| | `disk_read_iops`, `disk_write_iops` | Operations |
+| | `disk_util_pct` | iostat-style utilization |
+| **Network** (per interface) | `net_rx_mbps`, `net_tx_mbps` | Throughput |
+| | `net_rx_pps`, `net_tx_pps` | Packets |
+| **Power / Thermal** | `pkg_watts` | Intel RAPL or AMD energy interfaces |
+| | `pkg_temp_c` | Hottest core via coretemp / k10temp / zenpower / thermal_zone |
+| **GPU** (when present) | `gpu_util_pct`, `gpu_mem_mb`, `gpu_watts` | Via `nvidia-smi` |
+| **Processes** | `top_procs_by_cpu` | List of `{pid, name, cpu_pct, mem_mb}` (configurable N) |
+| | `top_procs_by_mem` | Same shape, top by memory |
+| **System** | `uptime_sec` | |
+| | `timestamp` | ISO8601, redundant with capture timestamp but useful for standalone analysis |
 
-**Collection `labs`** — document ID is the lab identifier (matches `machines.lab`). Sparsely populated in v1; exists so the v2 secret-storage refactor has a home. Likely fields later: display name, tailscale tag, default package list, allowed SSH keys, default GCP service-account key reference.
+#### `baseline` Readings
 
-### Configuration Variables
+| Field | Notes |
+|---|---|
+| `group` | Free-form string from config; the operator's grouping label |
+| `hostname` | Current OS hostname (after normalization, should equal Viam part name) |
+| `os` | `/etc/os-release` ID + VERSION |
+| `arch` | `runtime.GOARCH` |
+| `tailscale_ip` | When tailscale step is enabled and joined |
+| `module_version` | Build-time constant |
+| `last_reconcile_at` | Timestamp of most recent reconcile attempt |
+| `reconcile_status` | Map: `{viam_user: "ok", tailscale: "failed: <reason>", hostname: "ok", packages: "ok"}` — only includes steps that are enabled |
 
-Module config attributes (per-machine in v1; migrate to lab-level Firestore in v2):
+The baseline sensor returns `data.ErrNoCaptureToStore` from `Readings` when the current snapshot matches the last-emitted snapshot, except every Nth poll which forces emission as a heartbeat.
 
-- `lab` — free-form lab identifier, written into every registration doc
-- `tailscale_auth_key` — reusable, pre-tagged auth key for the lab's tailnet
-- `authorized_ssh_key` — the public key to place in `/home/viam/.ssh/authorized_keys`
-- `gcp_service_account_json` — JSON key for the Firestore-write service account
-- `packages` — list of apt package names to ensure installed (default: `htop vim emacs tmux git curl wget rsync jq lsof build-essential`)
-- `firestore_project` — GCP project ID hosting the Firestore database
+### Configuration
+
+Each reconcile step has its own config block; presence enables the step, absence disables it.
+
+```json
+{
+  "group": "warehouse-bots",
+  "heartbeat_polls": 120,
+
+  "viam_user": {
+    "ssh_authorized_key": "ssh-ed25519 AAAA..."
+  },
+
+  "tailscale": {
+    "auth_key": "tskey-..."
+  },
+
+  "hostname": {},
+
+  "packages": {
+    "list": ["htop", "vim", "emacs", "tmux", "git", "curl", "wget", "rsync", "jq", "lsof", "build-essential"]
+  }
+}
+```
+
+Top-level keys:
+- `group` — opaque label included in baseline Readings; used by operators for filtering / aggregation downstream
+- `heartbeat_polls` — force a baseline capture every N polls even when state hasn't changed (default 120)
+
+Step-block keys are step-specific. An empty object means "enable with defaults" (e.g., `hostname: {}` enables hostname normalization, which has no other configuration).
 
 ## Development Process
 
 **Testing approach:**
-- **Unit tests:** reconcile-step logic in isolation — status reporting, error handling, the framework's aggregation of per-step results, OS detection, structured log-line emission. Filesystem and exec calls are abstracted behind an interface so steps can be tested without a real root shell.
+- **Unit tests:** reconcile-step logic in isolation; status aggregation; OS detection; the `ErrNoCaptureToStore` decision for the baseline sensor; structured log-line emission. Filesystem and exec calls are abstracted behind an interface so steps can be tested without a real root shell.
 - **Integration tests:** reconcile framework end-to-end with fake steps, verifying logging discipline (no-op = one line, work = summary lines, errors surface without stack traces).
-- **Manual validation:** each milestone ends with deploying to a real Pi or Ubuntu VM and verifying the step runs, the registration appears in Firestore, and the UI reflects it.
+- **Manual validation:** each milestone ends with deploying to a real Linux machine and verifying readings appear in Viam data, and at least one Viam alert fires on a synthetic condition.
 
 **Deployment:**
-- Module published via the Viam module registry (or local module during development)
-- Viam Application built with Vite and deployed via the Viam Application upload flow
-- Firestore schema managed in code (no migration tooling in v1; the schema is small and the module writes idempotently)
+- Modules built locally or via `viam module build` cloud runners
+- Published to the Viam module registry per release (`viam module upload`)
+- `viam module reload` for fast iteration on a target machine during development
