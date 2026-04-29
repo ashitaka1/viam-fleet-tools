@@ -1,7 +1,7 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "avery:fleet-tools",
-  "visibility": "private",
+  "visibility": "public",
   "url": "https://github.com/ashitaka1/viam-fleet-tools",
   "description": "Fleet operator toolkit for Viam machines. Sensors for measuring system load (workload) and enforcing baseline machine state (baseline). Linux amd64/arm64.",
   "applications": null,
