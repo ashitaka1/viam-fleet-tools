@@ -21,15 +21,40 @@ const (
 )
 
 type Config struct {
-	TopNProcesses    int      `json:"top_n_processes,omitempty"`
-	ExtraDiskDevices []string `json:"extra_disk_devices,omitempty"`
+	TopNProcesses       int                  `json:"top_n_processes,omitempty"`
+	ExtraDiskDevices    []string             `json:"extra_disk_devices,omitempty"`
+	MonitoredComponents []MonitoredComponent `json:"monitored_components,omitempty"`
+}
+
+// MonitoredComponent declares a peer resource on the same machine whose
+// app-level state should be merged into each workload reading. On every
+// Readings call, workload sends DoCommand({AppStateCommand: true}) to the
+// resource named Name and stores the response under app_state[Key].
+type MonitoredComponent struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.TopNProcesses < 0 {
 		return nil, nil, fmt.Errorf("%s: top_n_processes must be >= 0", path)
 	}
-	return nil, nil, nil
+	seenKeys := make(map[string]struct{}, len(cfg.MonitoredComponents))
+	deps := make([]string, 0, len(cfg.MonitoredComponents))
+	for i, mc := range cfg.MonitoredComponents {
+		if mc.Name == "" {
+			return nil, nil, fmt.Errorf("%s: monitored_components[%d].name is required", path, i)
+		}
+		if mc.Key == "" {
+			return nil, nil, fmt.Errorf("%s: monitored_components[%d].key is required", path, i)
+		}
+		if _, dup := seenKeys[mc.Key]; dup {
+			return nil, nil, fmt.Errorf("%s: monitored_components: duplicate key %q", path, mc.Key)
+		}
+		seenKeys[mc.Key] = struct{}{}
+		deps = append(deps, mc.Name)
+	}
+	return deps, nil, nil
 }
 
 type Sensor struct {
@@ -39,10 +64,11 @@ type Sensor struct {
 	thermSrc *thermalSource
 	rapl     []raplDomain
 
-	// mu guards cfg and lastSnap against concurrent Readings/Reconfigure.
-	mu       sync.Mutex
-	cfg      *Config
-	lastSnap *Snapshot
+	// mu guards cfg, lastSnap, and monitored against concurrent Readings/Reconfigure.
+	mu        sync.Mutex
+	cfg       *Config
+	lastSnap  *Snapshot
+	monitored map[string]resource.Resource
 
 	cancelCtx  context.Context
 	cancelFunc func()
@@ -71,7 +97,7 @@ func newRegistered(
 
 func New(
 	ctx context.Context,
-	_ resource.Dependencies,
+	deps resource.Dependencies,
 	name resource.Name,
 	conf *Config,
 	logger logging.Logger,
@@ -86,6 +112,7 @@ func New(
 		cfg:        conf,
 		thermSrc:   thermSrc,
 		rapl:       rapl,
+		monitored:  resolveMonitored(deps, conf, logger),
 		cancelCtx:  cancelCtx,
 		cancelFunc: cancelFunc,
 	}
@@ -114,8 +141,8 @@ func (s *Sensor) logCapabilities() {
 		therm = s.thermSrc.dir
 	}
 	s.logger.Infof(
-		"workload sensor ready: thermal_source=%s rapl_domains=%d top_n_processes=%d",
-		therm, len(s.rapl), s.topNProcesses(),
+		"workload sensor ready: thermal_source=%s rapl_domains=%d top_n_processes=%d monitored=%d",
+		therm, len(s.rapl), s.topNProcesses(), len(s.monitored),
 	)
 }
 
@@ -162,19 +189,28 @@ func (s *Sensor) topNProcesses() int {
 
 func (s *Sensor) Reconfigure(
 	_ context.Context,
-	_ resource.Dependencies,
+	deps resource.Dependencies,
 	raw resource.Config,
 ) error {
 	conf, err := resource.NativeConfig[*Config](raw)
 	if err != nil {
 		return err
 	}
+	monitored := resolveMonitored(deps, conf, s.logger)
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	old := s.cfg
+	oldMonitored := len(s.monitored)
 	s.cfg = conf
-	if old == nil || old.TopNProcesses != conf.TopNProcesses {
-		s.logger.Infof("workload reconfigured: top_n_processes=%d", conf.TopNProcesses)
+	s.monitored = monitored
+	s.mu.Unlock()
+
+	changed := old == nil ||
+		old.TopNProcesses != conf.TopNProcesses ||
+		oldMonitored != len(monitored)
+	if changed {
+		s.logger.Infof("workload reconfigured: top_n_processes=%d monitored=%d",
+			conf.TopNProcesses, len(monitored))
 	}
 	return nil
 }
@@ -185,9 +221,14 @@ func (s *Sensor) Readings(
 ) (map[string]interface{}, error) {
 	s.mu.Lock()
 	prev := s.lastSnap
+	monitored := s.monitored
 	s.mu.Unlock()
 
 	out, snap := s.sample(ctx, prev, time.Now())
+
+	if app := gatherAppState(ctx, monitored, s.logger); app != nil {
+		out["app_state"] = app
+	}
 
 	s.mu.Lock()
 	s.lastSnap = snap

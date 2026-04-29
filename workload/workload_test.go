@@ -34,6 +34,56 @@ func TestConfigValidate(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("monitored_components surface as required deps", func(t *testing.T) {
+		cfg := &Config{MonitoredComponents: []MonitoredComponent{
+			{Name: "motor-left", Key: "drive_left"},
+			{Name: "arm-1", Key: "manipulation"},
+		}}
+		req, opt, err := cfg.Validate("components.0")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(opt) != 0 {
+			t.Errorf("expected no optional deps, got %v", opt)
+		}
+		want := []string{"motor-left", "arm-1"}
+		if len(req) != len(want) {
+			t.Fatalf("expected required deps %v, got %v", want, req)
+		}
+		for i, n := range want {
+			if req[i] != n {
+				t.Errorf("required deps[%d] = %q, want %q", i, req[i], n)
+			}
+		}
+	})
+
+	t.Run("monitored_components missing name rejected", func(t *testing.T) {
+		cfg := &Config{MonitoredComponents: []MonitoredComponent{{Key: "k"}}}
+		_, _, err := cfg.Validate("components.0")
+		if err == nil || !strings.Contains(err.Error(), "name is required") {
+			t.Fatalf("expected name-required error, got %v", err)
+		}
+	})
+
+	t.Run("monitored_components missing key rejected", func(t *testing.T) {
+		cfg := &Config{MonitoredComponents: []MonitoredComponent{{Name: "n"}}}
+		_, _, err := cfg.Validate("components.0")
+		if err == nil || !strings.Contains(err.Error(), "key is required") {
+			t.Fatalf("expected key-required error, got %v", err)
+		}
+	})
+
+	t.Run("monitored_components duplicate key rejected", func(t *testing.T) {
+		cfg := &Config{MonitoredComponents: []MonitoredComponent{
+			{Name: "a", Key: "k"},
+			{Name: "b", Key: "k"},
+		}}
+		_, _, err := cfg.Validate("components.0")
+		if err == nil || !strings.Contains(err.Error(), "duplicate key") {
+			t.Fatalf("expected duplicate-key error, got %v", err)
+		}
+	})
 }
 
 func TestTopNProcessesDefault(t *testing.T) {
