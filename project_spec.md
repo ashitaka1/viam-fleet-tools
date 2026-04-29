@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A small toolkit of Viam modules for fleet operators — measure machines, enforce baseline state on them, and surface both through Viam's existing alerting and data infrastructure. No external services to host; everything flows through the Viam fabric.
+A small Viam module for fleet operators — measure machines, enforce baseline state on them, and surface both through Viam's existing alerting and data infrastructure. Distributed as a single Viam module (`avery:fleet-tools`) declaring two sensor models (`workload`, `baseline`); no external services to host; everything flows through the Viam fabric.
 
 ## User Profile
 
@@ -34,14 +34,14 @@ A small toolkit of Viam modules for fleet operators — measure machines, enforc
 
 ### Required (v1)
 
-**`workload` sensor (Go module)**
+**`workload` model (Go sensor; subpackage `workload/`)**
 - Per-poll Readings dict capturing system metrics rich enough for workload characterization (see Data Schema below)
 - Cross-platform Linux: works on amd64 and arm64; Intel RAPL, AMD k10temp/zenpower, generic hwmon all detected at runtime; degrades silently when a metric source is unavailable
 - Optional config: `top_n_processes` (default 3), `extra_disk_devices` (default empty)
 - Polling interval governed by Viam data capture; no internal scheduling
 - All polls captured (legitimate time series data)
 
-**`baseline` sensor + DoCommand (Go module)**
+**`baseline` model (Go sensor + DoCommand; subpackage `baseline/`)**
 - Pluggable reconcile framework with per-step structured status
 - Root-check at startup; error loud if not running as root
 - OS detection (Linux distros listed above); error loud on unsupported
@@ -87,7 +87,7 @@ Vertical-slice build order:
 ## Tech Stack
 
 ### Language(s)
-- **Go** — both modules. Cross-compiles to a single static binary per architecture; matches the dominant Viam community module pattern; one toolchain across the repo.
+- **Go** — the entire `avery:fleet-tools` module. Cross-compiles to a single static binary per architecture that registers both models; matches the dominant Viam community module pattern; one toolchain across the repo.
 
 ### Frameworks/Libraries
 - Viam Go SDK (`go.viam.com/rdk/...`) — sensor API, module boilerplate, data manager integration, `data.ErrNoCaptureToStore` sentinel
@@ -143,13 +143,17 @@ Vertical-slice build order:
 | | `disk_util_pct` | iostat-style utilization |
 | **Network** (per interface) | `net_rx_mbps`, `net_tx_mbps` | Throughput |
 | | `net_rx_pps`, `net_tx_pps` | Packets |
-| **Power / Thermal** | `pkg_watts` | Intel RAPL or AMD energy interfaces |
-| | `pkg_temp_c` | Hottest core via coretemp / k10temp / zenpower / thermal_zone |
+| **Power** | `pkg_watts` | Intel RAPL or AMD energy interfaces |
+| **Thermal** | `cpu_temp_max_c` | Hottest core (throttling-proximity signal) |
+| | `cpu_temp_avg_c` | Mean across cores (cooling-adequacy / trend signal) |
+| | `cpu_temp_per_core_c` | Per-core array (hotspot detection, multi-package visibility) |
 | **GPU** (when present) | `gpu_util_pct`, `gpu_mem_mb`, `gpu_watts` | Via `nvidia-smi` |
 | **Processes** | `top_procs_by_cpu` | List of `{pid, name, cpu_pct, mem_mb}` (configurable N) |
 | | `top_procs_by_mem` | Same shape, top by memory |
 | **System** | `uptime_sec` | |
 | | `timestamp` | ISO8601, redundant with capture timestamp but useful for standalone analysis |
+
+Thermal source resolution: at startup, the sensor scans `/sys/class/hwmon/*/name` and `/sys/class/thermal/*/type` and selects the first match in priority order — `coretemp` → `zenpower` → `k10temp` → `thermal_zone(type=cpu_thermal)` → `thermal_zone(type=x86_pkg_temp)` — then reads only from that source on every poll. Per-core values come from `temp*_label` entries matching `Core N` (coretemp) or `Tdie`/`Tccd*` (k10temp/zenpower). When no recognized source is present, the `cpu_temp_*` keys are omitted entirely. Multi-socket aggregation is out of scope for v1.
 
 #### `baseline` Readings
 
@@ -160,7 +164,6 @@ Vertical-slice build order:
 | `os` | `/etc/os-release` ID + VERSION |
 | `arch` | `runtime.GOARCH` |
 | `tailscale_ip` | When tailscale step is enabled and joined |
-| `module_version` | Build-time constant |
 | `last_reconcile_at` | Timestamp of most recent reconcile attempt |
 | `reconcile_status` | Map: `{viam_user: "ok", tailscale: "failed: <reason>", hostname: "ok", packages: "ok"}` — only includes steps that are enabled |
 

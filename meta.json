@@ -1,0 +1,26 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "avery:fleet-tools",
+  "visibility": "private",
+  "url": "https://github.com/ashitaka1/viam-fleet-tools",
+  "description": "Fleet operator toolkit for Viam machines. Sensors for measuring system load (workload) and enforcing baseline machine state (baseline). Linux amd64/arm64.",
+  "applications": null,
+  "markdown_link": "README.md",
+  "entrypoint": "bin/fleet-tools",
+  "first_run": "",
+  "models": [
+    {
+      "api": "rdk:component:sensor",
+      "model": "avery:fleet-tools:workload"
+    }
+  ],
+  "build": {
+    "build": "make module.tar.gz",
+    "setup": "make setup",
+    "path": "module.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64"
+    ]
+  }
+}

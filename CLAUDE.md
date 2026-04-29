@@ -44,11 +44,12 @@ make test
 
 ### Build / Run
 
-Each module has its own subdirectory with its own `Makefile` and `meta.json`.
+The repo is a single Viam module (`avery:fleet-tools`) declaring multiple models. `Makefile`, `meta.json`, `go.mod`, `cmd/module/main.go`, and the deploy workflow live at the repo root. Each model's implementation lives in its own subpackage: `workload/` for the workload sensor, `baseline/` for the baseline sensor + service.
 
 ```bash
-# Per module:
-make build          # local build
-make test           # tests
-make package        # tar.gz for registry upload
+make build          # builds bin/fleet-tools (one binary registers all models)
+make test           # ./... — tests every subpackage
+make module.tar.gz  # tarball for registry upload
 ```
+
+**Convention:** Viam registry expects one git repo to map to one module. Multiple semantic concepts in this project (workload + baseline) are expressed as *models* within the single `avery:fleet-tools` module, not as separate modules.

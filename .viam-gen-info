@@ -1,0 +1,13 @@
+{
+  "module_name": "workload",
+  "visibility": "private",
+  "namespace": "viam",
+  "language": "go",
+  "resource_type": "component",
+  "resource_subtype": "sensor",
+  "model_name": "workload",
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2026-04-28T17:41:55.599815Z",
+  "module_readme_link": "README.md"
+}
